@@ -1,6 +1,8 @@
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', function () {
     const mainContent = document.getElementById('main-content');
     const navLinks = document.querySelectorAll('.nav-link');
+    let logRefreshInterval = null;
+    let taskRefreshInterval = null;
 
     // --- Templates for each section ---
     const templates = {
@@ -25,7 +27,17 @@ document.addEventListener('DOMContentLoaded', function() {
                         <input type="checkbox" id="recommended-only-checkbox">
                         仅看AI推荐
                     </label>
+                    <select id="sort-by-selector">
+                        <option value="crawl_time">按爬取时间</option>
+                        <option value="publish_time">按发布时间</option>
+                        <option value="price">按价格</option>
+                    </select>
+                    <select id="sort-order-selector">
+                        <option value="desc">降序</option>
+                        <option value="asc">升序</option>
+                    </select>
                     <button id="refresh-results-btn" class="control-button">🔄 刷新</button>
+                    <button id="delete-results-btn" class="control-button danger-btn" disabled>🗑️ 删除结果</button>
                 </div>
                 <div id="results-grid-container">
                     <p>请先选择一个结果文件。</p>
@@ -35,7 +47,14 @@ document.addEventListener('DOMContentLoaded', function() {
             <section id="logs-section" class="content-section">
                 <div class="section-header">
                     <h2>运行日志</h2>
-                    <button id="refresh-logs-btn" class="control-button">🔄 刷新</button>
+                    <div class="log-controls">
+                        <label>
+                            <input type="checkbox" id="auto-refresh-logs-checkbox">
+                            自动刷新
+                        </label>
+                        <button id="refresh-logs-btn" class="control-button">🔄 刷新</button>
+                        <button id="clear-logs-btn" class="control-button danger-btn">🗑️ 清空日志</button>
+                    </div>
                 </div>
                 <pre id="log-content-container">正在加载日志...</pre>
             </section>`,
@@ -45,6 +64,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 <div class="settings-card">
                     <h3>系统状态检查</h3>
                     <div id="system-status-container"><p>正在加载状态...</p></div>
+                </div>
+                <div class="settings-card">
+                    <h3>通知配置</h3>
+                    <div id="notification-settings-container">
+                        <p>正在加载通知配置...</p>
+                    </div>
                 </div>
                 <div class="settings-card">
                     <h3>Prompt 管理</h3>
@@ -63,6 +88,36 @@ document.addEventListener('DOMContentLoaded', function() {
     };
 
     // --- API Functions ---
+    async function fetchNotificationSettings() {
+        try {
+            const response = await fetch('/api/settings/notifications');
+            if (!response.ok) throw new Error('无法获取通知设置');
+            return await response.json();
+        } catch (error) {
+            console.error(error);
+            return null;
+        }
+    }
+
+    async function updateNotificationSettings(settings) {
+        try {
+            const response = await fetch('/api/settings/notifications', {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(settings),
+            });
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.detail || '更新通知设置失败');
+            }
+            return await response.json();
+        } catch (error) {
+            console.error('无法更新通知设置:', error);
+            alert(`错误: ${error.message}`);
+            return null;
+        }
+    }
+
     async function fetchPrompts() {
         try {
             const response = await fetch('/api/prompts');
@@ -89,8 +144,8 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             const response = await fetch(`/api/prompts/${filename}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: content }),
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({content: content}),
             });
             if (!response.ok) {
                 const errorData = await response.json();
@@ -121,6 +176,40 @@ document.addEventListener('DOMContentLoaded', function() {
             return await response.json();
         } catch (error) {
             console.error(`无法通过AI创建任务:`, error);
+            alert(`错误: ${error.message}`);
+            return null;
+        }
+    }
+
+    async function startSingleTask(taskId) {
+        try {
+            const response = await fetch(`/api/tasks/start/${taskId}`, {
+                method: 'POST',
+            });
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.detail || '启动任务失败');
+            }
+            return await response.json();
+        } catch (error) {
+            console.error(`无法启动任务 ${taskId}:`, error);
+            alert(`错误: ${error.message}`);
+            return null;
+        }
+    }
+
+    async function stopSingleTask(taskId) {
+        try {
+            const response = await fetch(`/api/tasks/stop/${taskId}`, {
+                method: 'POST',
+            });
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.detail || '停止任务失败');
+            }
+            return await response.json();
+        } catch (error) {
+            console.error(`无法停止任务 ${taskId}:`, error);
             alert(`错误: ${error.message}`);
             return null;
         }
@@ -191,12 +280,31 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    async function fetchResultContent(filename, recommendedOnly) {
+    async function deleteResultFile(filename) {
+        try {
+            const response = await fetch(`/api/results/files/${filename}`, {
+                method: 'DELETE',
+            });
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.detail || '删除结果文件失败');
+            }
+            return await response.json();
+        } catch (error) {
+            console.error(`无法删除结果文件 ${filename}:`, error);
+            alert(`错误: ${error.message}`);
+            return null;
+        }
+    }
+
+    async function fetchResultContent(filename, recommendedOnly, sortBy, sortOrder) {
         try {
             const params = new URLSearchParams({
                 page: 1,
                 limit: 100, // Fetch a decent number of items
-                recommended_only: recommendedOnly
+                recommended_only: recommendedOnly,
+                sort_by: sortBy,
+                sort_order: sortOrder
             });
             const response = await fetch(`/api/results/${filename}?${params}`);
             if (!response.ok) throw new Error(`无法获取文件 ${filename} 的内容`);
@@ -220,35 +328,185 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    async function fetchLogs() {
+    async function clearLogs() {
         try {
-            const response = await fetch('/api/logs');
+            const response = await fetch('/api/logs', {method: 'DELETE'});
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.detail || '清空日志失败');
+            }
+            return await response.json();
+        } catch (error) {
+            console.error("无法清空日志:", error);
+            alert(`错误: ${error.message}`);
+            return null;
+        }
+    }
+
+    async function deleteLoginState() {
+        try {
+            const response = await fetch('/api/login-state', {method: 'DELETE'});
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.detail || '删除登录凭证失败');
+            }
+            return await response.json();
+        } catch (error) {
+            console.error("无法删除登录凭证:", error);
+            alert(`错误: ${error.message}`);
+            return null;
+        }
+    }
+
+    async function fetchLogs(fromPos = 0) {
+        try {
+            const response = await fetch(`/api/logs?from_pos=${fromPos}`);
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
             return await response.json();
         } catch (error) {
             console.error("无法获取日志:", error);
-            return { content: `加载日志失败: ${error.message}` };
+            return {new_content: `\n加载日志失败: ${error.message}`, new_pos: fromPos};
         }
     }
 
     // --- Render Functions ---
+    function renderLoginStatusWidget(status) {
+        const container = document.getElementById('login-status-widget-container');
+        if (!container) return;
+
+        const loginState = status.login_state_file;
+        let content = '';
+
+        if (loginState && loginState.exists) {
+            content = `
+                <div class="login-status-widget">
+                    <span class="status-text status-ok">✓ 已登录</span>
+                    <div class="dropdown-menu">
+                        <a href="#" class="dropdown-item" id="update-login-state-btn-widget">手动更新</a>
+                        <a href="#" class="dropdown-item delete" id="delete-login-state-btn-widget">删除凭证</a>
+                    </div>
+                </div>
+            `;
+        } else {
+            content = `
+                <div class="login-status-widget">
+                    <span class="status-text status-error" id="update-login-state-btn-widget">! 闲鱼未登录 (点击设置)</span>
+                </div>
+            `;
+        }
+        container.innerHTML = content;
+    }
+
+    function renderNotificationSettings(settings) {
+        if (!settings) return '<p>无法加载通知设置。</p>';
+
+        return `
+            <form id="notification-settings-form">
+                <div class="form-group">
+                    <label for="ntfy-topic-url">Ntfy Topic URL</label>
+                    <input type="text" id="ntfy-topic-url" name="NTFY_TOPIC_URL" value="${settings.NTFY_TOPIC_URL || ''}" placeholder="例如: https://ntfy.sh/your_topic">
+                    <p class="form-hint">用于发送通知到 ntfy.sh 服务</p>
+                </div>
+                
+                <div class="form-group">
+                    <label for="gotify-url">Gotify URL</label>
+                    <input type="text" id="gotify-url" name="GOTIFY_URL" value="${settings.GOTIFY_URL || ''}" placeholder="例如: https://push.example.de">
+                    <p class="form-hint">Gotify 服务地址</p>
+                </div>
+                
+                <div class="form-group">
+                    <label for="gotify-token">Gotify Token</label>
+                    <input type="text" id="gotify-token" name="GOTIFY_TOKEN" value="${settings.GOTIFY_TOKEN || ''}" placeholder="例如: your_gotify_token">
+                    <p class="form-hint">Gotify 应用的 Token</p>
+                </div>
+                
+                <div class="form-group">
+                    <label for="bark-url">Bark URL</label>
+                    <input type="text" id="bark-url" name="BARK_URL" value="${settings.BARK_URL || ''}" placeholder="例如: https://api.day.app/your_key">
+                    <p class="form-hint">Bark 推送地址</p>
+                </div>
+                
+                <div class="form-group">
+                    <label for="wx-bot-url">企业微信机器人 URL</label>
+                    <input type="text" id="wx-bot-url" name="WX_BOT_URL" value="${settings.WX_BOT_URL || ''}" placeholder="例如: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your_key">
+                    <p class="form-hint">企业微信机器人的 Webhook 地址</p>
+                </div>
+                
+                <div class="form-group">
+                    <label for="webhook-url">通用 Webhook URL</label>
+                    <input type="text" id="webhook-url" name="WEBHOOK_URL" value="${settings.WEBHOOK_URL || ''}" placeholder="例如: https://your-webhook-url.com/endpoint">
+                    <p class="form-hint">通用 Webhook 的 URL 地址</p>
+                </div>
+                
+                <div class="form-group">
+                    <label for="webhook-method">Webhook 方法</label>
+                    <select id="webhook-method" name="WEBHOOK_METHOD">
+                        <option value="POST" ${settings.WEBHOOK_METHOD === 'POST' ? 'selected' : ''}>POST</option>
+                        <option value="GET" ${settings.WEBHOOK_METHOD === 'GET' ? 'selected' : ''}>GET</option>
+                    </select>
+                    <p class="form-hint">Webhook 请求方法</p>
+                </div>
+                
+                <div class="form-group">
+                    <label for="webhook-headers">Webhook 请求头 (JSON)</label>
+                    <textarea id="webhook-headers" name="WEBHOOK_HEADERS" rows="3" placeholder='例如: {"Authorization": "Bearer token"}'>${settings.WEBHOOK_HEADERS || ''}</textarea>
+                    <p class="form-hint">必须是有效的 JSON 字符串</p>
+                </div>
+                
+                <div class="form-group">
+                    <label for="webhook-content-type">Webhook 内容类型</label>
+                    <select id="webhook-content-type" name="WEBHOOK_CONTENT_TYPE">
+                        <option value="JSON" ${settings.WEBHOOK_CONTENT_TYPE === 'JSON' ? 'selected' : ''}>JSON</option>
+                        <option value="FORM" ${settings.WEBHOOK_CONTENT_TYPE === 'FORM' ? 'selected' : ''}>FORM</option>
+                    </select>
+                    <p class="form-hint">POST 请求的内容类型</p>
+                </div>
+                
+                <div class="form-group">
+                    <label for="webhook-query-parameters">Webhook 查询参数 (JSON)</label>
+                    <textarea id="webhook-query-parameters" name="WEBHOOK_QUERY_PARAMETERS" rows="3" placeholder='例如: {"param1": "value1"}'>${settings.WEBHOOK_QUERY_PARAMETERS || ''}</textarea>
+                    <p class="form-hint">GET 请求的查询参数，支持 \${title} 和 \${content} 占位符</p>
+                </div>
+                
+                <div class="form-group">
+                    <label for="webhook-body">Webhook 请求体 (JSON)</label>
+                    <textarea id="webhook-body" name="WEBHOOK_BODY" rows="3" placeholder='例如: {"message": "\${content}"}'>${settings.WEBHOOK_BODY || ''}</textarea>
+                    <p class="form-hint">POST 请求的请求体，支持 \${title} 和 \${content} 占位符</p>
+                </div>
+                
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="pcurl-to-mobile" name="PCURL_TO_MOBILE" ${settings.PCURL_TO_MOBILE ? 'checked' : ''}>
+                        将电脑版链接转换为手机版
+                    </label>
+                    <p class="form-hint">在通知中将电脑版商品链接转换为手机版</p>
+                </div>
+                
+                <button type="submit" class="control-button primary-btn">保存通知设置</button>
+            </form>
+        `;
+    }
+
+    async function refreshLoginStatusWidget() {
+        const status = await fetchSystemStatus();
+        if (status) {
+            renderLoginStatusWidget(status);
+        }
+    }
+
     function renderSystemStatus(status) {
         if (!status) return '<p>无法加载系统状态。</p>';
 
-        const renderStatusTag = (isOk) => isOk 
-            ? `<span class="tag status-ok">正常</span>` 
+        const renderStatusTag = (isOk) => isOk
+            ? `<span class="tag status-ok">正常</span>`
             : `<span class="tag status-error">异常</span>`;
 
         const env = status.env_file || {};
 
         return `
             <ul class="status-list">
-                <li class="status-item">
-                    <span class="label">登录状态文件 (xianyu_state.json)</span>
-                    <span class="value">${renderStatusTag(status.login_state_file && status.login_state_file.exists)}</span>
-                </li>
                 <li class="status-item">
                     <span class="label">环境变量文件 (.env)</span>
                     <span class="value">${renderStatusTag(env.exists)}</span>
@@ -286,26 +544,43 @@ document.addEventListener('DOMContentLoaded', function() {
             const isRecommended = ai.is_recommended === true;
             const recommendationClass = isRecommended ? 'recommended' : 'not-recommended';
             const recommendationText = isRecommended ? '推荐' : (ai.is_recommended === false ? '不推荐' : '待定');
-            
+
             const imageUrl = (info.商品图片列表 && info.商品图片列表[0]) ? info.商品图片列表[0] : 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+            const crawlTime = item.爬取时间 ? new Date(item.爬取时间).toLocaleString('sv-SE').slice(0, 16) : '未知';
+            const publishTime = info.发布时间 || '未知';
+
+            // Escape HTML to prevent XSS
+            const escapeHtml = (unsafe) => {
+                if (typeof unsafe !== 'string') return unsafe;
+                return unsafe
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;")
+                    .replace(/'/g, "&#039;");
+            };
 
             return `
-            <div class="result-card" data-item='${JSON.stringify(item)}'>
+            <div class="result-card" data-item='${escapeHtml(JSON.stringify(item))}'>
                 <div class="card-image">
-                    <a href="${info.商品链接 || '#'}" target="_blank"><img src="${imageUrl}" alt="${info.商品标题 || '商品图片'}" loading="lazy"></a>
+                    <a href="${escapeHtml(info.商品链接) || '#'}" target="_blank"><img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(info.商品标题) || '商品图片'}" loading="lazy" onerror="this.onerror=null; this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjZGRkIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxOCIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPuWbvueJhzwvdGV4dD48L3N2Zz4=';"></a>
                 </div>
                 <div class="card-content">
-                    <h3 class="card-title"><a href="${info.商品链接 || '#'}" target="_blank" title="${info.商品标题 || ''}">${info.商品标题 || '无标题'}</a></h3>
-                    <p class="card-price">${info.当前售价 || '价格未知'}</p>
+                    <h3 class="card-title"><a href="${escapeHtml(info.商品链接) || '#'}" target="_blank" title="${escapeHtml(info.商品标题) || ''}">${escapeHtml(info.商品标题) || '无标题'}</a></h3>
+                    <p class="card-price">${escapeHtml(info.当前售价) || '价格未知'}</p>
                     <div class="card-ai-summary ${recommendationClass}">
-                        <strong>AI建议: ${recommendationText}</strong>
-                        <p title="${ai.reason || ''}">原因: ${ai.reason || '无分析'}</p>
+                        <strong>AI建议: ${escapeHtml(recommendationText)}</strong>
+                        <p title="${escapeHtml(ai.reason) || ''}">原因: ${escapeHtml(ai.reason) || '无分析'}</p>
                     </div>
                     <div class="card-footer">
-                        <span class="seller-info">卖家: ${info.卖家昵称 || seller.卖家昵称 || '未知'}</span>
-                        <span>
-                            <a href="${info.商品链接 || '#'}" target="_blank" class="action-btn">查看详情</a>
-                        </span>
+                        <div>
+                            <span class="seller-info" title="${escapeHtml(info.卖家昵称) || escapeHtml(seller.卖家昵称) || '未知'}">卖家: ${escapeHtml(info.卖家昵称) || escapeHtml(seller.卖家昵称) || '未知'}</span>
+                            <div class="time-info">
+                                <p>发布于: ${escapeHtml(publishTime)}</p>
+                                <p>抓取于: ${escapeHtml(crawlTime)}</p>
+                            </div>
+                        </div>
+                        <a href="${escapeHtml(info.商品链接) || '#'}" target="_blank" class="action-btn">查看详情</a>
                     </div>
                 </div>
             </div>
@@ -325,15 +600,28 @@ document.addEventListener('DOMContentLoaded', function() {
                 <tr>
                     <th>启用</th>
                     <th>任务名称</th>
+                    <th>运行状态</th>
                     <th>关键词</th>
                     <th>价格范围</th>
                     <th>筛选条件</th>
+                    <th>最大页数</th>
                     <th>AI 标准</th>
+                    <th>定时规则</th>
                     <th>操作</th>
                 </tr>
             </thead>`;
 
-        const tableBody = tasks.map(task => `
+        const tableBody = tasks.map(task => {
+            const isRunning = task.is_running === true;
+            const statusBadge = isRunning
+                ? `<span class="status-badge status-running">运行中</span>`
+                : `<span class="status-badge status-stopped">已停止</span>`;
+
+            const actionButton = isRunning
+                ? `<button class="action-btn stop-task-btn" data-task-id="${task.id}">停止</button>`
+                : `<button class="action-btn run-task-btn" data-task-id="${task.id}" ${!task.enabled ? 'disabled title="任务已禁用"' : ''}>运行</button>`;
+
+            return `
             <tr data-task-id="${task.id}" data-task='${JSON.stringify(task)}'>
                 <td>
                     <label class="switch">
@@ -342,21 +630,34 @@ document.addEventListener('DOMContentLoaded', function() {
                     </label>
                 </td>
                 <td>${task.task_name}</td>
+                <td>${statusBadge}</td>
                 <td><span class="tag">${task.keyword}</span></td>
                 <td>${task.min_price || '不限'} - ${task.max_price || '不限'}</td>
                 <td>${task.personal_only ? '<span class="tag personal">个人闲置</span>' : ''}</td>
+                <td>${task.max_pages || 3}</td>
                 <td>${(task.ai_prompt_criteria_file || 'N/A').replace('prompts/', '')}</td>
+                <td>${task.cron || '未设置'}</td>
                 <td>
+                    ${actionButton}
                     <button class="action-btn edit-btn">编辑</button>
                     <button class="action-btn delete-btn">删除</button>
                 </td>
-            </tr>`).join('');
+            </tr>`
+        }).join('');
 
         return `<table class="tasks-table">${tableHeader}<tbody>${tableBody}</tbody></table>`;
     }
 
 
     async function navigateTo(hash) {
+        if (logRefreshInterval) {
+            clearInterval(logRefreshInterval);
+            logRefreshInterval = null;
+        }
+        if (taskRefreshInterval) {
+            clearInterval(taskRefreshInterval);
+            taskRefreshInterval = null;
+        }
         const sectionId = hash.substring(1) || 'tasks';
 
         // Update nav links active state
@@ -378,16 +679,19 @@ document.addEventListener('DOMContentLoaded', function() {
             // --- Load data for the current section ---
             if (sectionId === 'tasks') {
                 const container = document.getElementById('tasks-table-container');
-                const tasks = await fetchTasks();
-                container.innerHTML = renderTasksTable(tasks);
+                const refreshTasks = async () => {
+                    const tasks = await fetchTasks();
+                    // Avoid re-rendering if in edit mode to not lose user input
+                    if (container && !container.querySelector('tr.editing')) {
+                        container.innerHTML = renderTasksTable(tasks);
+                    }
+                };
+                await refreshTasks();
+                taskRefreshInterval = setInterval(refreshTasks, 5000);
             } else if (sectionId === 'results') {
                 await initializeResultsView();
             } else if (sectionId === 'logs') {
-                const logContainer = document.getElementById('log-content-container');
-                const logs = await fetchLogs();
-                logContainer.textContent = logs.content;
-                // 自动滚动到底部
-                logContainer.scrollTop = logContainer.scrollHeight;
+                await initializeLogsView();
             } else if (sectionId === 'settings') {
                 await initializeSettingsView();
             }
@@ -397,23 +701,93 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    async function initializeLogsView() {
+        const logContainer = document.getElementById('log-content-container');
+        const refreshBtn = document.getElementById('refresh-logs-btn');
+        const autoRefreshCheckbox = document.getElementById('auto-refresh-logs-checkbox');
+        const clearBtn = document.getElementById('clear-logs-btn');
+        let currentLogSize = 0;
+
+        const updateLogs = async (isFullRefresh = false) => {
+            // For incremental updates, check if user is at the bottom BEFORE adding new content.
+            const shouldAutoScroll = isFullRefresh || (logContainer.scrollHeight - logContainer.clientHeight <= logContainer.scrollTop + 5);
+
+            if (isFullRefresh) {
+                currentLogSize = 0;
+                logContainer.textContent = '正在加载...';
+            }
+
+            const logData = await fetchLogs(currentLogSize);
+
+            if (isFullRefresh) {
+                // If the log is empty, show a message instead of a blank screen.
+                logContainer.textContent = logData.new_content || '日志为空，等待内容...';
+            } else if (logData.new_content) {
+                // If it was showing the empty message, replace it.
+                if (logContainer.textContent === '日志为空，等待内容...') {
+                    logContainer.textContent = logData.new_content;
+                } else {
+                    logContainer.textContent += logData.new_content;
+                }
+            }
+            currentLogSize = logData.new_pos;
+
+            // Scroll to bottom if it was a full refresh or if the user was already at the bottom.
+            if (shouldAutoScroll) {
+                logContainer.scrollTop = logContainer.scrollHeight;
+            }
+        };
+
+        refreshBtn.addEventListener('click', () => updateLogs(true));
+
+        clearBtn.addEventListener('click', async () => {
+            if (confirm('你确定要清空所有运行日志吗？此操作不可恢复。')) {
+                const result = await clearLogs();
+                if (result) {
+                    await updateLogs(true);
+                    alert('日志已清空。');
+                }
+            }
+        });
+
+        autoRefreshCheckbox.addEventListener('change', () => {
+            if (autoRefreshCheckbox.checked) {
+                if (logRefreshInterval) clearInterval(logRefreshInterval);
+                logRefreshInterval = setInterval(() => updateLogs(false), 1000);
+            } else {
+                if (logRefreshInterval) {
+                    clearInterval(logRefreshInterval);
+                    logRefreshInterval = null;
+                }
+            }
+        });
+
+        await updateLogs(true);
+    }
+
     async function fetchAndRenderResults() {
         const selector = document.getElementById('result-file-selector');
         const checkbox = document.getElementById('recommended-only-checkbox');
+        const sortBySelector = document.getElementById('sort-by-selector');
+        const sortOrderSelector = document.getElementById('sort-order-selector');
         const container = document.getElementById('results-grid-container');
 
-        if (!selector || !checkbox || !container) return;
+        if (!selector || !checkbox || !container || !sortBySelector || !sortOrderSelector) return;
 
         const selectedFile = selector.value;
         const recommendedOnly = checkbox.checked;
+        const sortBy = sortBySelector.value;
+        const sortOrder = sortOrderSelector.value;
 
         if (!selectedFile) {
             container.innerHTML = '<p>请先选择一个结果文件。</p>';
             return;
         }
 
+        localStorage.setItem('lastSelectedResultFile', selectedFile);
+
         container.innerHTML = '<p>正在加载结果...</p>';
-        const data = await fetchResultContent(selectedFile, recommendedOnly);
+        const data = await fetchResultContent(selectedFile, recommendedOnly, sortBy, sortOrder);
         container.innerHTML = renderResultsGrid(data);
     }
 
@@ -421,13 +795,58 @@ document.addEventListener('DOMContentLoaded', function() {
         const selector = document.getElementById('result-file-selector');
         const checkbox = document.getElementById('recommended-only-checkbox');
         const refreshBtn = document.getElementById('refresh-results-btn');
+        const deleteBtn = document.getElementById('delete-results-btn');
+        const sortBySelector = document.getElementById('sort-by-selector');
+        const sortOrderSelector = document.getElementById('sort-order-selector');
 
         const fileData = await fetchResultFiles();
         if (fileData && fileData.files && fileData.files.length > 0) {
-            selector.innerHTML = fileData.files.map(f => `<option value="${f}">${f}</option>`).join('');
+            const lastSelectedFile = localStorage.getItem('lastSelectedResultFile');
+            // Determine the file to select. Default to the first file if nothing is stored or if the stored file no longer exists.
+            let fileToSelect = fileData.files[0];
+            if (lastSelectedFile && fileData.files.includes(lastSelectedFile)) {
+                fileToSelect = lastSelectedFile;
+            }
+
+            selector.innerHTML = fileData.files.map(f =>
+                `<option value="${f}" ${f === fileToSelect ? 'selected' : ''}>${f}</option>`
+            ).join('');
+
+            // The selector's value is now correctly set by the 'selected' attribute.
+            // We can proceed with adding listeners and the initial fetch.
+
             selector.addEventListener('change', fetchAndRenderResults);
             checkbox.addEventListener('change', fetchAndRenderResults);
+            sortBySelector.addEventListener('change', fetchAndRenderResults);
+            sortOrderSelector.addEventListener('change', fetchAndRenderResults);
             refreshBtn.addEventListener('click', fetchAndRenderResults);
+            
+            // Enable delete button when a file is selected
+            const updateDeleteButtonState = () => {
+                deleteBtn.disabled = !selector.value;
+            };
+            selector.addEventListener('change', updateDeleteButtonState);
+            // 初始化时也更新一次删除按钮状态
+            updateDeleteButtonState();
+            
+            // Delete button functionality
+            deleteBtn.addEventListener('click', async () => {
+                const selectedFile = selector.value;
+                if (!selectedFile) {
+                    alert('请先选择一个结果文件。');
+                    return;
+                }
+                
+                if (confirm(`你确定要删除结果文件 "${selectedFile}" 吗？此操作不可恢复。`)) {
+                    const result = await deleteResultFile(selectedFile);
+                    if (result) {
+                        alert(result.message);
+                        // Refresh the file list
+                        await initializeResultsView();
+                    }
+                }
+            });
+            
             // Initial load
             await fetchAndRenderResults();
         } else {
@@ -442,7 +861,16 @@ document.addEventListener('DOMContentLoaded', function() {
         const status = await fetchSystemStatus();
         statusContainer.innerHTML = renderSystemStatus(status);
 
-        // 2. Setup Prompt Editor
+        // 2. Render Notification Settings
+        const notificationContainer = document.getElementById('notification-settings-container');
+        const notificationSettings = await fetchNotificationSettings();
+        if (notificationSettings !== null) {
+            notificationContainer.innerHTML = renderNotificationSettings(notificationSettings);
+        } else {
+            notificationContainer.innerHTML = '<p>加载通知配置失败。请检查服务器是否正常运行。</p>';
+        }
+
+        // 3. Setup Prompt Editor
         const promptSelector = document.getElementById('prompt-selector');
         const promptEditor = document.getElementById('prompt-editor');
         const savePromptBtn = document.getElementById('save-prompt-btn');
@@ -450,8 +878,11 @@ document.addEventListener('DOMContentLoaded', function() {
         const prompts = await fetchPrompts();
         if (prompts && prompts.length > 0) {
             promptSelector.innerHTML = '<option value="">-- 请选择 --</option>' + prompts.map(p => `<option value="${p}">${p}</option>`).join('');
-        } else {
+        } else if (prompts && prompts.length === 0) {
             promptSelector.innerHTML = '<option value="">没有找到Prompt文件</option>';
+        } else {
+            // prompts is null or undefined, which means fetch failed
+            promptSelector.innerHTML = '<option value="">加载Prompt文件列表失败</option>';
         }
 
         promptSelector.addEventListener('change', async () => {
@@ -491,15 +922,56 @@ document.addEventListener('DOMContentLoaded', function() {
                 alert(result.message || "保存成功！");
             }
             // No need to show alert on failure, as updatePrompt already does.
-            
+
             savePromptBtn.disabled = false;
             savePromptBtn.textContent = '保存更改';
         });
+
+        // 4. Add event listener for notification settings form
+        const notificationForm = document.getElementById('notification-settings-form');
+        if (notificationForm) {
+            notificationForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                
+                // Collect form data
+                const formData = new FormData(notificationForm);
+                const settings = {};
+                
+                // Handle regular inputs
+                for (let [key, value] of formData.entries()) {
+                    if (key === 'PCURL_TO_MOBILE') {
+                        settings[key] = value === 'on';
+                    } else {
+                        settings[key] = value || '';
+                    }
+                }
+                
+                // Handle unchecked checkboxes (they don't appear in FormData)
+                const pcurlCheckbox = document.getElementById('pcurl-to-mobile');
+                if (pcurlCheckbox && !pcurlCheckbox.checked) {
+                    settings.PCURL_TO_MOBILE = false;
+                }
+                
+                // Save settings
+                const saveBtn = notificationForm.querySelector('button[type="submit"]');
+                const originalText = saveBtn.textContent;
+                saveBtn.disabled = true;
+                saveBtn.textContent = '保存中...';
+                
+                const result = await updateNotificationSettings(settings);
+                if (result) {
+                    alert(result.message || "通知设置已保存！");
+                }
+                
+                saveBtn.disabled = false;
+                saveBtn.textContent = originalText;
+            });
+        }
     }
 
     // Handle navigation clicks
     navLinks.forEach(link => {
-        link.addEventListener('click', function(e) {
+        link.addEventListener('click', function (e) {
             e.preventDefault();
             const hash = this.getAttribute('href');
             if (window.location.hash !== hash) {
@@ -527,13 +999,29 @@ document.addEventListener('DOMContentLoaded', function() {
             const itemData = JSON.parse(card.dataset.item);
             const jsonContent = document.getElementById('json-viewer-content');
             jsonContent.textContent = JSON.stringify(itemData, null, 2);
-            
+
             const modal = document.getElementById('json-viewer-modal');
             modal.style.display = 'flex';
             setTimeout(() => modal.classList.add('visible'), 10);
+        } else if (button.matches('.run-task-btn')) {
+            const taskId = button.dataset.taskId;
+            button.disabled = true;
+            button.textContent = '启动中...';
+            await startSingleTask(taskId);
+            // The auto-refresh will update the UI. For immediate feedback:
+            const tasks = await fetchTasks();
+            document.getElementById('tasks-table-container').innerHTML = renderTasksTable(tasks);
+        } else if (button.matches('.stop-task-btn')) {
+            const taskId = button.dataset.taskId;
+            button.disabled = true;
+            button.textContent = '停止中...';
+            await stopSingleTask(taskId);
+            // The auto-refresh will update the UI. For immediate feedback:
+            const tasks = await fetchTasks();
+            document.getElementById('tasks-table-container').innerHTML = renderTasksTable(tasks);
         } else if (button.matches('.edit-btn')) {
             const taskData = JSON.parse(row.dataset.task);
-            
+
             row.classList.add('editing');
             row.innerHTML = `
                 <td>
@@ -553,7 +1041,9 @@ document.addEventListener('DOMContentLoaded', function() {
                         <input type="checkbox" ${taskData.personal_only ? 'checked' : ''} data-field="personal_only"> 个人闲置
                     </label>
                 </td>
+                <td><input type="number" value="${taskData.max_pages || 3}" data-field="max_pages" style="width: 60px;" min="1"></td>
                 <td>${(taskData.ai_prompt_criteria_file || 'N/A').replace('prompts/', '')}</td>
+                <td><input type="text" value="${taskData.cron || ''}" placeholder="* * * * *" data-field="cron"></td>
                 <td>
                     <button class="action-btn save-btn">保存</button>
                     <button class="action-btn cancel-btn">取消</button>
@@ -588,7 +1078,13 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (input.type === 'checkbox') {
                     updatedData[field] = input.checked;
                 } else {
-                    updatedData[field] = input.value.trim() === '' ? null : input.value.trim();
+                    const value = input.value.trim();
+                    if (field === 'max_pages') {
+                        // 确保 max_pages 作为数字发送，如果为空则默认为3
+                        updatedData[field] = value ? parseInt(value, 10) : 3;
+                    } else {
+                        updatedData[field] = value === '' ? null : value;
+                    }
                 }
             });
 
@@ -602,12 +1098,6 @@ document.addEventListener('DOMContentLoaded', function() {
             const container = document.getElementById('tasks-table-container');
             const tasks = await fetchTasks();
             container.innerHTML = renderTasksTable(tasks);
-        } else if (button.matches('#refresh-logs-btn')) {
-            const logContainer = document.getElementById('log-content-container');
-            logContainer.textContent = '正在刷新...';
-            const logs = await fetchLogs();
-            logContainer.textContent = logs.content;
-            logContainer.scrollTop = logContainer.scrollHeight;
         }
     });
 
@@ -620,7 +1110,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const isEnabled = target.checked;
 
             if (taskId) {
-                await updateTask(taskId, { enabled: isEnabled });
+                await updateTask(taskId, {enabled: isEnabled});
                 // The visual state is already updated by the checkbox itself.
             }
         }
@@ -665,6 +1155,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 min_price: formData.get('min_price') || null,
                 max_price: formData.get('max_price') || null,
                 personal_only: formData.get('personal_only') === 'on',
+                max_pages: parseInt(formData.get('max_pages'), 10) || 3,
+                cron: formData.get('cron') || null,
             };
 
             // Show loading state
@@ -694,85 +1186,85 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
 
-    // --- Header Controls & Status ---
-    function updateHeaderControls(status) {
-        const statusIndicator = document.getElementById('status-indicator');
-        const statusText = document.getElementById('status-text');
-        const startBtn = document.getElementById('start-all-tasks');
-        const stopBtn = document.getElementById('stop-all-tasks');
-
-        // Reset buttons state
-        startBtn.disabled = false;
-        startBtn.innerHTML = `🚀 全部启动`;
-        stopBtn.disabled = false;
-        stopBtn.innerHTML = `🛑 全部停止`;
-
-        if (status && status.scraper_running) {
-            statusIndicator.className = 'status-running';
-            statusText.textContent = '运行中';
-            startBtn.style.display = 'none';
-            stopBtn.style.display = 'inline-block';
-        } else {
-            statusIndicator.className = 'status-stopped';
-            statusText.textContent = '已停止';
-            startBtn.style.display = 'inline-block';
-            stopBtn.style.display = 'none';
-        }
-    }
-
-    async function refreshSystemStatus() {
-        const status = await fetchSystemStatus();
-        updateHeaderControls(status);
-    }
-
-    document.getElementById('start-all-tasks').addEventListener('click', async () => {
-        const btn = document.getElementById('start-all-tasks');
-        btn.disabled = true;
-        btn.innerHTML = `<span class="spinner" style="vertical-align: middle;"></span> 启动中...`;
-
-        try {
-            const response = await fetch('/api/tasks/start-all', { method: 'POST' });
-            if (!response.ok) {
-                const err = await response.json();
-                throw new Error(err.detail || '启动失败');
-            }
-            await response.json();
-            // Give backend a moment to update state before refreshing
-            setTimeout(refreshSystemStatus, 1000);
-        } catch (error) {
-            alert(`启动任务失败: ${error.message}`);
-            await refreshSystemStatus(); // Refresh status to reset button state
-        }
-    });
-
-    document.getElementById('stop-all-tasks').addEventListener('click', async () => {
-        const btn = document.getElementById('stop-all-tasks');
-        btn.disabled = true;
-        btn.innerHTML = `<span class="spinner" style="vertical-align: middle;"></span> 停止中...`;
-
-        try {
-            const response = await fetch('/api/tasks/stop-all', { method: 'POST' });
-            if (!response.ok) {
-                const err = await response.json();
-                throw new Error(err.detail || '停止失败');
-            }
-            await response.json();
-            setTimeout(refreshSystemStatus, 1000);
-        } catch (error) {
-            alert(`停止任务失败: ${error.message}`);
-            await refreshSystemStatus(); // Refresh status to reset button state
-        }
-    });
-
     // Initial load
+    refreshLoginStatusWidget();
     navigateTo(window.location.hash || '#tasks');
-    refreshSystemStatus();
+
+    // --- Global Event Listener for header/modals ---
+    document.body.addEventListener('click', async (event) => {
+        const target = event.target;
+        const widgetUpdateBtn = target.closest('#update-login-state-btn-widget');
+        const widgetDeleteBtn = target.closest('#delete-login-state-btn-widget');
+        const copyCodeBtn = target.closest('#copy-login-script-btn');
+
+        if (copyCodeBtn) {
+            event.preventDefault();
+            const codeToCopy = document.getElementById('login-script-code').textContent.trim();
+
+            // 在安全上下文中使用现代剪贴板API，否则使用备用方法
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(codeToCopy).then(() => {
+                    copyCodeBtn.textContent = '已复制!';
+                    setTimeout(() => {
+                        copyCodeBtn.textContent = '复制脚本';
+                    }, 2000);
+                }).catch(err => {
+                    console.error('无法使用剪贴板API复制文本: ', err);
+                    alert('复制失败，请手动复制。');
+                });
+            } else {
+                // 针对非安全上下文 (如HTTP) 或旧版浏览器的备用方案
+                const textArea = document.createElement("textarea");
+                textArea.value = codeToCopy;
+                // 使文本区域不可见
+                textArea.style.position = "fixed";
+                textArea.style.top = "-9999px";
+                textArea.style.left = "-9999px";
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    copyCodeBtn.textContent = '已复制!';
+                    setTimeout(() => {
+                        copyCodeBtn.textContent = '复制脚本';
+                    }, 2000);
+                } catch (err) {
+                    console.error('备用方案: 无法复制文本', err);
+                    alert('复制失败，请手动复制。');
+                }
+                document.body.removeChild(textArea);
+            }
+        } else if (widgetUpdateBtn) {
+            event.preventDefault();
+            const modal = document.getElementById('login-state-modal');
+            modal.style.display = 'flex';
+            setTimeout(() => modal.classList.add('visible'), 10);
+        } else if (widgetDeleteBtn) {
+            event.preventDefault();
+            if (confirm('你确定要删除登录凭证 (xianyu_state.json) 吗？删除后需要重新设置才能运行任务。')) {
+                const result = await deleteLoginState();
+                if (result) {
+                    alert(result.message);
+                    await refreshLoginStatusWidget(); // Refresh the widget UI
+                    // Also refresh settings view if it's currently active
+                    if (window.location.hash === '#settings' || window.location.hash === '') {
+                        const statusContainer = document.getElementById('system-status-container');
+                        if (statusContainer) {
+                            const status = await fetchSystemStatus();
+                            statusContainer.innerHTML = renderSystemStatus(status);
+                        }
+                    }
+                }
+            }
+        }
+    });
 
     // --- JSON Viewer Modal Logic ---
     const jsonViewerModal = document.getElementById('json-viewer-modal');
     if (jsonViewerModal) {
         const closeBtn = document.getElementById('close-json-viewer-btn');
-        
+
         const closeModal = () => {
             jsonViewerModal.classList.remove('visible');
             setTimeout(() => {
@@ -786,5 +1278,71 @@ document.addEventListener('DOMContentLoaded', function() {
                 closeModal();
             }
         });
+    }
+
+    // --- Login State Modal Logic ---
+    const loginStateModal = document.getElementById('login-state-modal');
+    if (loginStateModal) {
+        const closeBtn = document.getElementById('close-login-state-modal-btn');
+        const cancelBtn = document.getElementById('cancel-login-state-btn');
+        const saveBtn = document.getElementById('save-login-state-btn');
+        const form = document.getElementById('login-state-form');
+        const contentTextarea = document.getElementById('login-state-content');
+
+        const closeModal = () => {
+            loginStateModal.classList.remove('visible');
+            setTimeout(() => {
+                loginStateModal.style.display = 'none';
+                form.reset();
+            }, 300);
+        };
+
+        async function updateLoginState(content) {
+            saveBtn.disabled = true;
+            saveBtn.textContent = '保存中...';
+            try {
+                const response = await fetch('/api/login-state', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({content: content}),
+                });
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || '更新登录状态失败');
+                }
+                alert('登录状态更新成功！');
+                closeModal();
+                await refreshLoginStatusWidget(); // Refresh the widget UI
+                // Also refresh settings view if it's currently active
+                if (window.location.hash === '#settings') {
+                    await initializeSettingsView();
+                }
+            } catch (error) {
+                console.error('更新登录状态时出错:', error);
+                alert(`更新失败: ${error.message}`);
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.textContent = '保存';
+            }
+        }
+
+        closeBtn.addEventListener('click', closeModal);
+        cancelBtn.addEventListener('click', closeModal);
+        loginStateModal.addEventListener('click', (event) => {
+            if (event.target === loginStateModal) {
+                closeModal();
+            }
+        });
+
+        saveBtn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const content = contentTextarea.value.trim();
+            if (!content) {
+                alert('请粘贴从浏览器获取的JSON内容。');
+                return;
+            }
+            await updateLoginState(content);
+        });
+
     }
 });
